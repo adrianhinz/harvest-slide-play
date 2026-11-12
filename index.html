@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#2a160d">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Harvest Slide">
+  <title>Harvest Slide</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23f07818'/%3E%3Ccircle cx='10' cy='23' r='5' fill='%232a241e'/%3E%3Ccircle cx='23' cy='23' r='5' fill='%232a241e'/%3E%3Crect x='7' y='9' width='18' height='10' rx='2' fill='%23ffe7b0'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <div id="app">
+    <header class="top">
+      <div class="stat fieldstat">
+        <b id="level-num">1</b>
+        <span class="fieldmeta">
+          <span id="level-name">First Furrow</span>
+          <span id="best-stars" class="best"></span>
+        </span>
+      </div>
+      <div class="stat">
+        <span class="label">Moves</span>
+        <b id="move-count">0</b>
+        <small id="par-label">par 3</small>
+      </div>
+      <div class="stat">
+        <span class="label">Plowed</span>
+        <b id="plow-count">0%</b>
+      </div>
+      <div class="coinbox">
+        <span class="coin-pip" aria-hidden="true"></span>
+        <span id="coin-count">0</span>
+        <span class="sr">coins</span>
+      </div>
+      <button type="button" id="btn-sound" class="toy mini" aria-pressed="false" aria-label="Turn sound on">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path id="speaker-body" fill="#3a2412" d="M4 9h4l5-4v14l-5-4H4z"/>
+          <path id="speaker-waves" fill="none" stroke="#3a2412" stroke-width="2" stroke-linecap="round" d="M16 9c1.2 1 1.2 5 0 6M18.5 7c2 2 2 8 0 10"/>
+          <path id="speaker-off" fill="none" stroke="#3a2412" stroke-width="2" stroke-linecap="round" d="M16 8l6 8M22 8l-6 8"/>
+        </svg>
+      </button>
+    </header>
+
+    <div id="board-wrap">
+      <canvas id="board" aria-label="Farm field"></canvas>
+    </div>
+
+    <footer>
+      <button type="button" id="btn-restart" class="toy mini">Restart</button>
+      <button type="button" id="btn-levels" class="toy mini">Fields</button>
+      <div class="arrows" role="group" aria-label="Drive">
+        <button type="button" class="toy mini pad left" data-dir="left" aria-label="Left"></button>
+        <button type="button" class="toy mini pad down" data-dir="down" aria-label="Down"></button>
+        <button type="button" class="toy mini pad up" data-dir="up" aria-label="Up"></button>
+        <button type="button" class="toy mini pad right" data-dir="right" aria-label="Right"></button>
+      </div>
+    </footer>
+
+    <div id="overlay" class="sheet" role="dialog" aria-modal="true" aria-labelledby="win-title" aria-hidden="true">
+      <div class="ticket">
+        <div class="stripe" aria-hidden="true"></div>
+        <h2 id="win-title">Field plowed</h2>
+        <div id="win-stars" class="win-stars"></div>
+        <p id="win-stars-text" class="sr"></p>
+        <p id="win-detail"></p>
+        <p id="win-moves"></p>
+        <div class="ticket-actions">
+          <button type="button" id="btn-next" class="toy primary">Next field</button>
+          <button type="button" id="btn-replay" class="toy">Replay</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="adbreak" class="sheet" role="dialog" aria-modal="true" aria-labelledby="ad-title" aria-hidden="true">
+      <div class="ad-card">
+        <p class="ad-kicker">A quick word from the farm</p>
+        <h2 id="ad-title">Sunny Farm Valley</h2>
+        <p class="ad-blurb">From the maker of Harvest Slide — Sunny Farm Valley, free on iOS.</p>
+        <!-- TODO: replace href with the real Sunny Farm Valley App Store listing URL -->
+        <a class="toy primary ad-cta" href="https://apps.apple.com/" target="_blank" rel="noopener">View on the App Store</a>
+        <p id="ad-count" class="ad-count" aria-live="polite"></p>
+        <button type="button" id="ad-close" class="toy">Close</button>
+      </div>
+    </div>
+
+    <div id="modal" class="sheet" role="dialog" aria-modal="true" aria-labelledby="modal-title" aria-hidden="true">
+      <div class="panel">
+        <div class="panel-head">
+          <h2 id="modal-title">Fields</h2>
+          <button type="button" id="btn-modal-close" class="toy">Close</button>
+        </div>
+        <div id="modal-grid" class="field-grid"></div>
+      </div>
+    </div>
+  </div>
+
+  <script src="js/levels.js"></script>
+  <script src="js/engine.js"></script>
+  <script src="js/audio.js"></script>
+  <script src="js/art-kit.js"></script>
+  <script src="js/ads.js"></script>
+  <script src="js/main.js"></script>
+</body>
+</html>
