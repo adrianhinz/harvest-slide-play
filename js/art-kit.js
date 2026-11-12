@@ -1,20 +1,29 @@
 /* Harvest Slide — Graphics Kit (art-kit.js)
  *
- * Canvas-based, dependency-free tile/object renderer in the glossy
- * "AMAZE-like" language, translated to a farm theme. Original art,
- * drawn entirely in code — no external images, no copied assets.
+ * Canvas-based, dependency-free farm renderer in a smooth AMAZE-like
+ * language. Original art, drawn entirely in code — no external images,
+ * no copied assets.
  *
- * Usage (game side):
- *   <script src="art-kit.js"></script>
+ * Phase 4 look: the field is ONE continuous soil surface inside a rounded
+ * frame (no per-tile blocks, bevels or grid gaps). The plowed trail is a
+ * smooth painted band with rounded caps and rounded turns drawn as one
+ * flowing shape. Fences join into continuous wooden wall runs, rocks are
+ * smooth shaded boulders, mud is a glossy puddle, crops and bales sit ON
+ * the surface. Usage (game side):
+ *
  *   HarvestArt.prerenderAll(192);          // once at boot
- *   HarvestArt.drawTile(ctx, 'dirt', x, y, s);            // per cell
- *   HarvestArt.drawTrail(ctx, x, y, s, progress, 'right');// animated fill
+ *   HarvestArt.drawFieldBase(ctx, x, y, w, h, tile);   // soil surface
+ *   HarvestArt.drawTrailLayer(ctx, field, isFull, partial); // paint band
+ *   HarvestArt.drawFenceCells(ctx, cells, tile);       // joined walls
+ *   HarvestArt.drawRockCells(ctx, cells, tile);        // boulders
+ *   HarvestArt.drawMudPuddle(ctx, x, y, s, plowed);    // glossy puddle
+ *   HarvestArt.drawTile(ctx, 'corn', x, y, s);         // sits on surface
  *   HarvestArt.drawTractor(ctx, x, y, s, { tilt, squash });
+ *   HarvestArt.drawFieldLight(ctx, x, y, w, h);        // top-down light
  *   HarvestArt.spawnDust(px, py, 6); ... update/draw particles each frame
  *
- * Phone-first: tiles are pre-rendered once to offscreen canvases at a
- * fixed resolution, then blitted with drawImage (fast on mobile).
- * Animated pieces (trail edge, barn glow, tractor, particles) draw live.
+ * Phone-first: small sprites are pre-rendered once to offscreen canvases,
+ * then blitted with drawImage. Surfaces and unions draw live (cheap rects).
  */
 (function (global) {
   'use strict';
@@ -22,20 +31,18 @@
   // ---------------------------------------------------------------- palette
   // Named constants — the whole kit reads from here. Tweak these to reskin.
   var PALETTE = {
-    // field
-    dirtLight:   '#CE9050',
-    dirtBase:    '#A5662F',
-    dirtDark:    '#77431A',
-    dirtSpeck1:  '#8A5226',
-    dirtSpeck2:  '#DCA468',
-    gridLine:    '#FFFFFF',
+    // field: one warm flat soil + flecks (no per-tile bevels anymore)
+    soilTop:     '#B4713B',
+    soilBottom:  '#9E5C2A',
+    soilRim:     'rgba(74,38,12,0.55)',
+    soilSpeck1:  '#8A5226',
+    soilSpeck2:  '#DCA468',
 
-    // plowed trail ("paint fill" signature)
-    trailLight:  '#9A6132',
-    trailBase:   '#7C4A21',
-    trailDark:   '#57300F',
-    furrowDark:  '#5A3212',
-    furrowLight: '#A06A38',
+    // plowed trail ("paint fill" signature): richer, darker, faint furrows
+    trailTop:    '#8A5427',
+    trailBottom: '#6E3F1B',
+    furrowDark:  'rgba(52,28,9,0.45)',
+    furrowLight: 'rgba(255,220,170,0.20)',
 
     // crops
     cornLeaf:    '#2F9E44',
@@ -52,17 +59,18 @@
 
     // specials
     mudBase:     '#5D3A1E',
-    mudDark:     '#40260F',
+    mudDark:     '#3A2210',
     mudGloss:    'rgba(255,255,255,0.55)',
     hayBase:     '#E8B93E',
     hayDark:     '#B97F1F',
     hayBand:     '#9A6410',
     woodBase:    '#8B5A2B',
     woodDark:    '#5F3B17',
-    woodLight:   '#B07C3E',
-    rockBase:    '#ADB5BD',
-    rockDark:    '#6C757D',
-    rockLight:   '#DEE2E6',
+    woodLight:   '#A1763A',
+    woodLine:    'rgba(70,40,14,0.35)',
+    rockBase:    '#9AA3AD',
+    rockDark:    '#646E78',
+    rockLight:   '#E2E8EE',
     barnRed:     '#E03131',
     barnDark:    '#A61E1E',
     barnTrim:    '#FFFFFF',
@@ -79,7 +87,7 @@
     // fx
     dust:        'rgba(214,186,150,0.9)',
     sparkle:     '#FFF3BF',
-    confetti:    ['#FF6B6B', '#FFD43B', '#51CF66', '#4DABF7', '#B197FC', '#FF922B'],
+    confetti:    ['#FF6B6B', '#FFD43B', '#51CF66', '#4DABF7', '#B197FC', '#FF9226'],
     shadow:      'rgba(60,30,5,0.35)'
   };
 
@@ -110,7 +118,7 @@
     ctx.ellipse(x, y, rx, ry, 0, 0, Math.PI * 2);
   }
 
-  // Deterministic pseudo-random from an int seed (stable speckles per tile).
+  // Deterministic pseudo-random from an int seed (stable flecks every run).
   function srand(seed) {
     var t = (seed * 1664525 + 1013904223) >>> 0;
     return function () {
@@ -119,77 +127,10 @@
     };
   }
 
-  // Glossy rounded-square foundation: vertical gradient + bottom shade +
-  // top-edge highlight + soft drop shadow. Everything sits on this.
-  function tileBase(ctx, s, cTop, cMid, cBot, opts) {
-    opts = opts || {};
-    var pad = s * 0.045;                 // gap so the grid reads clean/bright
-    var x = pad, y = pad, w = s - pad * 2, h = s - pad * 2;
-    var r = s * 0.20;
-
-    // soft drop shadow (anything raised gets one)
-    if (opts.shadow !== false) {
-      ctx.save();
-      ctx.fillStyle = PALETTE.shadow;
-      rr(ctx, x + s * 0.02, y + s * 0.045, w, h, r);
-      ctx.fill();
-      ctx.restore();
-    }
-
-    var g = ctx.createLinearGradient(0, y, 0, y + h);
-    g.addColorStop(0, cTop);
-    g.addColorStop(0.45, cMid);
-    g.addColorStop(1, cBot);
-    ctx.fillStyle = g;
-    rr(ctx, x, y, w, h, r);
-    ctx.fill();
-
-    // bottom inner shade (bevel) — painted BEFORE the top highlight
-    ctx.save();
-    rr(ctx, x, y, w, h, r);
-    ctx.clip();
-    var bg = ctx.createLinearGradient(0, y + h * 0.72, 0, y + h);
-    bg.addColorStop(0, 'rgba(0,0,0,0)');
-    bg.addColorStop(1, 'rgba(0,0,0,0.22)');
-    ctx.fillStyle = bg;
-    ctx.fillRect(x, y, w, h);
-
-    // top-edge highlight strip (the AMAZE gloss cue)
-    var hg = ctx.createLinearGradient(0, y, 0, y + h * 0.30);
-    hg.addColorStop(0, 'rgba(255,255,255,0.55)');
-    hg.addColorStop(1, 'rgba(255,255,255,0)');
-    ctx.fillStyle = hg;
-    ctx.fillRect(x + r * 0.7, y + h * 0.03, w - r * 1.4, h * 0.27);
-
-    // thin bright rim just inside the top-left corner
-    ctx.strokeStyle = 'rgba(255,255,255,0.35)';
-    ctx.lineWidth = Math.max(1, s * 0.012);
-    ctx.beginPath();
-    ctx.moveTo(x + r, y + s * 0.035);
-    ctx.lineTo(x + w - r, y + s * 0.035);
-    ctx.stroke();
-    ctx.restore();
-
-    return { x: x, y: y, w: w, h: h, r: r };
-  }
-
-  function speckles(ctx, box, seed, colors, n, rMin, rMax) {
-    var rnd = srand(seed);
-    for (var i = 0; i < n; i++) {
-      var px = box.x + box.r * 0.4 + rnd() * (box.w - box.r * 0.8);
-      var py = box.y + box.h * 0.28 + rnd() * (box.h * 0.66 - box.r * 0.4);
-      var pr = box.w * (rMin + rnd() * (rMax - rMin));
-      ctx.fillStyle = colors[i % colors.length];
-      ctx.globalAlpha = 0.5;
-      circle(ctx, px, py, pr);
-      ctx.fill();
-    }
-    ctx.globalAlpha = 1;
-  }
-
   // ------------------------------------------------------- sprite prerender
   var SPRITES = {};      // key -> canvas
   var SPRITE_PX = 192;   // bake resolution; blitted scaled at draw time
+  var NOISE = null;      // baked fleck tile for the soil surface
 
   function makeSprite(key, painter) {
     var c = document.createElement('canvas');
@@ -200,27 +141,493 @@
     return c;
   }
 
-  function blit(ctx, key, x, y, s) {
-    ctx.drawImage(SPRITES[key], x, y, s, s);
+  function bakeNoise() {
+    var c = document.createElement('canvas');
+    c.width = 128;
+    c.height = 128;
+    var g = c.getContext('2d');
+    var rnd = srand(20261112);
+    for (var i = 0; i < 210; i++) {
+      var px = rnd() * 128, py = rnd() * 128;
+      var pr = 0.5 + rnd() * 1.6;
+      g.fillStyle = (i % 2) ? PALETTE.soilSpeck1 : PALETTE.soilSpeck2;
+      g.globalAlpha = 0.16 + rnd() * 0.20;
+      g.beginPath();
+      g.arc(px, py, pr, 0, Math.PI * 2);
+      g.fill();
+    }
+    // a few slightly larger dry clods for texture
+    for (var j = 0; j < 26; j++) {
+      var qx = rnd() * 128, qy = rnd() * 128;
+      var qr = 1.8 + rnd() * 2.2;
+      g.fillStyle = PALETTE.soilSpeck1;
+      g.globalAlpha = 0.10 + rnd() * 0.10;
+      g.beginPath();
+      g.arc(qx, qy, qr, 0, Math.PI * 2);
+      g.fill();
+    }
+    g.globalAlpha = 1;
+    NOISE = c;
   }
 
-  // ---------------------------------------------------------------- painters
-  function paintDirt(ctx, s, seed) {
-    var box = tileBase(ctx, s, PALETTE.dirtLight, PALETTE.dirtBase, PALETTE.dirtDark);
-    speckles(ctx, box, seed || 7, [PALETTE.dirtSpeck1, PALETTE.dirtSpeck2], 16, 0.008, 0.028);
+  // ------------------------------------------------- continuous soil field
+  // One seamless surface: soft drop shadow, warm flat gradient, baked
+  // fleck texture, soft inner shadow and a thin rim. No tiles, no gaps.
+  function drawFieldBase(ctx, x, y, w, h, tile) {
+    var r = Math.min(tile * 0.35, 16);
+    // soft drop shadow under the whole field slab
+    ctx.save();
+    ctx.fillStyle = 'rgba(30,14,3,0.45)';
+    rr(ctx, x + 2, y + 5, w, h, r);
+    ctx.fill();
+    ctx.restore();
+
+    var g = ctx.createLinearGradient(0, y, 0, y + h);
+    g.addColorStop(0, PALETTE.soilTop);
+    g.addColorStop(1, PALETTE.soilBottom);
+    ctx.fillStyle = g;
+    rr(ctx, x, y, w, h, r);
+    ctx.fill();
+
+    // fleck texture tiled over the surface, clipped to the frame
+    if (NOISE) {
+      ctx.save();
+      rr(ctx, x, y, w, h, r);
+      ctx.clip();
+      ctx.globalAlpha = 0.9;
+      ctx.fillStyle = ctx.createPattern(NOISE, 'repeat');
+      ctx.fillRect(x, y, w, h);
+      ctx.globalAlpha = 1;
+      ctx.restore();
+    }
+
+    // soft inner shadow: darkened top and side edges (sunken-field read)
+    ctx.save();
+    rr(ctx, x, y, w, h, r);
+    ctx.clip();
+    var sh = Math.max(6, tile * 0.30);
+    var ig = ctx.createLinearGradient(0, y, 0, y + sh);
+    ig.addColorStop(0, 'rgba(50,24,6,0.30)');
+    ig.addColorStop(1, 'rgba(50,24,6,0)');
+    ctx.fillStyle = ig;
+    ctx.fillRect(x, y, w, sh);
+    var igL = ctx.createLinearGradient(x, 0, x + sh, 0);
+    igL.addColorStop(0, 'rgba(50,24,6,0.22)');
+    igL.addColorStop(1, 'rgba(50,24,6,0)');
+    ctx.fillStyle = igL;
+    ctx.fillRect(x, y, sh, h);
+    var igR = ctx.createLinearGradient(x + w, 0, x + w - sh, 0);
+    igR.addColorStop(0, 'rgba(50,24,6,0.22)');
+    igR.addColorStop(1, 'rgba(50,24,6,0)');
+    ctx.fillStyle = igR;
+    ctx.fillRect(x + w - sh, y, sh, h);
+    var igB = ctx.createLinearGradient(0, y + h, 0, y + h - sh * 0.6);
+    igB.addColorStop(0, 'rgba(255,225,170,0.10)');
+    igB.addColorStop(1, 'rgba(255,225,170,0)');
+    ctx.fillStyle = igB;
+    ctx.fillRect(x, y + h - sh * 0.6, w, sh * 0.6);
+    ctx.restore();
   }
 
-  function paintCropBase(ctx, s, seed) {
-    // harvested-into dirt: crops sit on field soil so the set hangs together.
-    var box = tileBase(ctx, s, PALETTE.dirtLight, PALETTE.dirtBase, PALETTE.dirtDark);
-    speckles(ctx, box, seed || 11, [PALETTE.dirtSpeck1], 8, 0.008, 0.022);
-    return box;
+  // One soft top-down light wash over the whole board (AMAZE-style sun).
+  function drawFieldLight(ctx, x, y, w, h, tile) {
+    var r = Math.min(tile * 0.35, 16);
+    ctx.save();
+    rr(ctx, x, y, w, h, r);
+    ctx.clip();
+    var g = ctx.createLinearGradient(0, y, 0, y + h);
+    g.addColorStop(0, 'rgba(255,242,214,0.14)');
+    g.addColorStop(0.55, 'rgba(255,242,214,0.02)');
+    g.addColorStop(1, 'rgba(60,22,0,0.10)');
+    ctx.fillStyle = g;
+    ctx.fillRect(x, y, w, h);
+    // thin rim so the slab reads against the dark wood surround
+    ctx.strokeStyle = PALETTE.soilRim;
+    ctx.lineWidth = 2;
+    rr(ctx, x + 1, y + 1, w - 2, h - 2, Math.max(1, r - 1));
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // ------------------------------------------- seamless union cell coverage
+  // Cells are filled as exact full-bleed squares (guaranteed seamless),
+  // then every grid vertex is inspected: convex outer corners get rounded
+  // (soil-colored cut + paint-colored quarter disc) and concave inner
+  // corners get a fillet disc. Straight edges need nothing.
+  function eachVertex(rows, cols, fn) {
+    for (var vr = 0; vr <= rows; vr++) {
+      for (var vc = 0; vc <= cols; vc++) fn(vr, vc);
+    }
+  }
+
+  function quadAt(isOn, rows, cols, vr, vc) {
+    // occupancy of the 4 cells around vertex (vr, vc); out of bounds = off
+    var tl = (vr > 0 && vc > 0) ? isOn(vr - 1, vc - 1) : false;
+    var tr = (vr > 0 && vc < cols) ? isOn(vr - 1, vc) : false;
+    var bl = (vr < rows && vc > 0) ? isOn(vr, vc - 1) : false;
+    var br = (vr < rows && vc < cols) ? isOn(vr, vc) : false;
+    return [tl, tr, bl, br];
+  }
+
+  function roundUnionCorners(ctx, ox, oy, t, rows, cols, isOn, paintGrad,
+                             soilGrad, rad) {
+    // paintGrad/soilGrad: fill styles (gradients in field space stay
+    // seamless across cells). rad: corner radius in px.
+    eachVertex(rows, cols, function (vr, vc) {
+      var q = quadAt(isOn, rows, cols, vr, vc);
+      var n = (q[0] ? 1 : 0) + (q[1] ? 1 : 0) + (q[2] ? 1 : 0) + (q[3] ? 1 : 0);
+      if (n === 0 || n === 4) return;
+      var vx = ox + vc * t, vy = oy + vr * t;
+      if (n === 1) {
+        // convex corner: erase the paint square in the ON cell's corner
+        // back to soil, then roll a paint disc into it. The cut MUST sit
+        // inside the ON cell's quadrant — anywhere else floats a stray
+        // square outside the union.
+        var idx = q[0] ? 0 : q[1] ? 1 : q[2] ? 2 : 3;
+        var dx = (idx === 0 || idx === 2) ? -1 : 1;
+        var dy = (idx === 0 || idx === 1) ? -1 : 1;
+        ctx.fillStyle = soilGrad;
+        ctx.fillRect((idx === 0 || idx === 2) ? vx - rad : vx,
+                     (idx === 0 || idx === 1) ? vy - rad : vy, rad, rad);
+        ctx.fillStyle = paintGrad;
+        circle(ctx, vx + dx * rad, vy + dy * rad, rad);
+        ctx.fill();
+      } else if (n === 3) {
+        // concave corner: fillet disc melts the inner step
+        ctx.fillStyle = paintGrad;
+        circle(ctx, vx, vy, rad);
+        ctx.fill();
+      } else {
+        // two cells: straight run (adjacent) needs nothing; a diagonal
+        // touch gets a small dab so no soil pinhole shows.
+        var adj = (q[0] && q[1]) || (q[2] && q[3]) ||
+                  (q[0] && q[2]) || (q[1] && q[3]);
+        if (!adj) {
+          ctx.fillStyle = paintGrad;
+          circle(ctx, vx, vy, rad * 0.55);
+          ctx.fill();
+        }
+      }
+    });
+  }
+
+  // ------------------------------------------------------- the painted band
+  // field: { x, y, tile, rows, cols }. isFull(r, c) -> bool for finished
+  // cells. partial: { r, c, frac, dir } | null for the cell mid-sweep.
+  function drawTrailLayer(ctx, field, isFull, partial) {
+    var ox = field.x, oy = field.y, t = field.tile;
+    var rows = field.rows, cols = field.cols;
+    var paint = ctx.createLinearGradient(0, oy, 0, oy + rows * t);
+    paint.addColorStop(0, PALETTE.trailTop);
+    paint.addColorStop(1, PALETTE.trailBottom);
+    var soil = ctx.createLinearGradient(0, oy, 0, oy + rows * t);
+    soil.addColorStop(0, PALETTE.soilTop);
+    soil.addColorStop(1, PALETTE.soilBottom);
+
+    // soft fringe under the band so the edge melts into the soil.
+    // One fill call: per-cell translucent fills would double-darken laps.
+    ctx.save();
+    ctx.fillStyle = 'rgba(46,22,6,0.28)';
+    ctx.beginPath();
+    for (var fr = 0; fr < rows; fr++) {
+      for (var fc = 0; fc < cols; fc++) {
+        if (!isFull(fr, fc)) continue;
+        ctx.rect(ox + fc * t - 1, oy + fr * t - 1, t + 2, t + 2);
+      }
+    }
+    ctx.fill();
+    ctx.restore();
+
+    // seamless band body
+    ctx.fillStyle = paint;
+    for (var r = 0; r < rows; r++) {
+      for (var c = 0; c < cols; c++) {
+        if (!isFull(r, c)) continue;
+        ctx.fillRect(ox + c * t, oy + r * t, t, t);
+      }
+    }
+    roundUnionCorners(ctx, ox, oy, t, rows, cols, isFull, paint, soil,
+                      t * 0.24);
+
+    // faint furrows running along the band (tilled-soil read), clipped
+    // to the finished band + the partial sweep.
+    ctx.save();
+    ctx.beginPath();
+    for (var cr = 0; cr < rows; cr++) {
+      for (var cc = 0; cc < cols; cc++) {
+        if (isFull(cr, cc)) ctx.rect(ox + cc * t, oy + cr * t, t, t);
+      }
+    }
+    if (partial) {
+      var pr = partialRect(ox, oy, t, partial);
+      ctx.rect(pr.x, pr.y, pr.w, pr.h);
+    }
+    ctx.clip();
+    ctx.lineWidth = Math.max(1, t * 0.028);
+    for (var lr = 0; lr < rows; lr++) {
+      for (var k = 0; k < 3; k++) {
+        var fy = oy + lr * t + t * (0.25 + k * 0.25);
+        ctx.strokeStyle = (k % 2) ? PALETTE.furrowLight : PALETTE.furrowDark;
+        ctx.globalAlpha = 0.55;
+        ctx.beginPath();
+        ctx.moveTo(ox, fy);
+        ctx.lineTo(ox + cols * t, fy);
+        ctx.stroke();
+      }
+    }
+    ctx.globalAlpha = 1;
+    ctx.restore();
+
+    // the live sweep: partial cell + rounded wet leading cap
+    if (partial && partial.frac > 0.001) drawPartialSweep(ctx, field, partial, paint);
+  }
+
+  function partialRect(ox, oy, t, p) {
+    var x = ox + p.c * t, y = oy + p.r * t;
+    var f = Math.max(0, Math.min(1, p.frac));
+    if (p.dir === 'right') return { x: x, y: y, w: t * f, h: t };
+    if (p.dir === 'left') return { x: x + t * (1 - f), y: y, w: t * f, h: t };
+    if (p.dir === 'down') return { x: x, y: y, w: t, h: t * f };
+    return { x: x, y: y + t * (1 - f), w: t, h: t * f }; // up
+  }
+
+  function drawPartialSweep(ctx, field, p, paint) {
+    var t = field.tile;
+    var pr = partialRect(field.x, field.y, t, p);
+    ctx.fillStyle = paint;
+    ctx.fillRect(pr.x, pr.y, pr.w, pr.h);
+    // rounded wet cap + glossy lip at the leading edge
+    var cx, cy, capR = t * 0.5;
+    if (p.dir === 'right') { cx = pr.x + pr.w; cy = pr.y + t / 2; }
+    else if (p.dir === 'left') { cx = pr.x; cy = pr.y + t / 2; }
+    else if (p.dir === 'down') { cx = pr.x + t / 2; cy = pr.y + pr.h; }
+    else { cx = pr.x + t / 2; cy = pr.y; }
+    ctx.fillStyle = paint;
+    circle(ctx, cx, cy, capR);
+    ctx.fill();
+    ctx.fillStyle = 'rgba(255,235,200,0.30)';
+    ellipse(ctx, cx, cy - capR * 0.35, capR * 0.30, capR * 0.16);
+    ctx.fill();
+  }
+
+  // Standalone sweep painter (kept for API compat; the layer above is
+  // what the game uses). Assumes soil is already beneath.
+  function drawTrail(ctx, x, y, s, progress, dir) {
+    progress = Math.max(0, Math.min(1, progress));
+    if (progress <= 0.001) return;
+    var paint = ctx.createLinearGradient(0, y, 0, y + s);
+    paint.addColorStop(0, PALETTE.trailTop);
+    paint.addColorStop(1, PALETTE.trailBottom);
+    drawPartialSweep(ctx, { x: x, y: y, tile: s }, {
+      r: 0, c: 0, frac: progress, dir: dir || 'right'
+    }, paint);
+  }
+
+  // --------------------------------------- walls that join along their run
+  // Fence cells merge into continuous low wooden walls: one soft shadow,
+  // one top-lit wooden body with rounded outer corners, grain lines and
+  // round posts only at run ends and junctions. cells: [{r,c}].
+  function drawFenceCells(ctx, field, cells) {
+    if (!cells.length) return;
+    var ox = field.x, oy = field.y, t = field.tile;
+    var on = cellSet(cells);
+    var isOn = function (r, c) { return !!on[r + ',' + c]; };
+    var wood = ctx.createLinearGradient(0, oy, 0, oy + field.rows * t);
+    wood.addColorStop(0, PALETTE.woodLight);
+    wood.addColorStop(0.45, PALETTE.woodBase);
+    wood.addColorStop(1, PALETTE.woodDark);
+
+    // gentle drop shadow of the whole run, offset down onto the soil.
+    // One fill call so laps between cells never double-darken.
+    ctx.save();
+    ctx.fillStyle = PALETTE.shadow;
+    ctx.beginPath();
+    cells.forEach(function (cell) {
+      ctx.rect(ox + cell.c * t, oy + cell.r * t + t * 0.07, t, t);
+    });
+    ctx.fill();
+    ctx.restore();
+
+    // joined wooden body
+    ctx.fillStyle = wood;
+    cells.forEach(function (cell) {
+      ctx.fillRect(ox + cell.c * t, oy + cell.r * t, t, t);
+    });
+    var woodFlat = PALETTE.woodBase;
+    roundUnionCorners(ctx, ox, oy, t, field.rows, field.cols, isOn,
+                      wood, woodFlat, t * 0.30);
+
+    // grain: plank lines follow the run's direction so long walls read
+    // as joined timber, never as ladder rungs.
+    ctx.save();
+    ctx.beginPath();
+    cells.forEach(function (cell) {
+      ctx.rect(ox + cell.c * t, oy + cell.r * t, t, t);
+    });
+    ctx.clip();
+    ctx.strokeStyle = PALETTE.woodLine;
+    ctx.lineWidth = Math.max(1, t * 0.03);
+    cells.forEach(function (cell) {
+      var cx0 = ox + cell.c * t, cy0 = oy + cell.r * t;
+      var horiz = isOn(cell.r, cell.c - 1) || isOn(cell.r, cell.c + 1);
+      var vert = isOn(cell.r - 1, cell.c) || isOn(cell.r + 1, cell.c);
+      if (horiz || (!horiz && !vert)) {
+        ctx.beginPath();
+        ctx.moveTo(cx0 - 1, cy0 + t * 0.36);
+        ctx.lineTo(cx0 + t + 1, cy0 + t * 0.36);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(cx0 - 1, cy0 + t * 0.64);
+        ctx.lineTo(cx0 + t + 1, cy0 + t * 0.64);
+        ctx.stroke();
+      }
+      if (vert) {
+        ctx.beginPath();
+        ctx.moveTo(cx0 + t * 0.36, cy0 - 1);
+        ctx.lineTo(cx0 + t * 0.36, cy0 + t + 1);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(cx0 + t * 0.64, cy0 - 1);
+        ctx.lineTo(cx0 + t * 0.64, cy0 + t + 1);
+        ctx.stroke();
+      }
+    });
+    // top-light wash over the run
+    var tg = ctx.createLinearGradient(0, oy, 0, oy + field.rows * t);
+    tg.addColorStop(0, 'rgba(255,235,200,0.15)');
+    tg.addColorStop(0.4, 'rgba(255,235,200,0)');
+    ctx.fillStyle = tg;
+    ctx.fillRect(ox, oy, field.cols * t, field.rows * t);
+    ctx.restore();
+
+    // round posts only at the run's outer corners and ends: every convex
+    // union vertex gets one post tucked just inside the corner, so long
+    // runs read as one joined wall instead of a ladder of squares.
+    eachVertex(field.rows, field.cols, function (vr, vc) {
+      var q = quadAt(isOn, field.rows, field.cols, vr, vc);
+      var n = (q[0] ? 1 : 0) + (q[1] ? 1 : 0) + (q[2] ? 1 : 0) + (q[3] ? 1 : 0);
+      if (n !== 1) return;
+      var idx = q[0] ? 0 : q[1] ? 1 : q[2] ? 2 : 3;
+      var dx = (idx === 0 || idx === 2) ? -1 : 1;
+      var dy = (idx === 0 || idx === 1) ? -1 : 1;
+      var px = ox + vc * t + dx * t * 0.20;
+      var py = oy + vr * t + dy * t * 0.20;
+      var pg = ctx.createLinearGradient(px - t * 0.09, 0, px + t * 0.09, 0);
+      pg.addColorStop(0, PALETTE.woodDark);
+      pg.addColorStop(0.5, PALETTE.woodBase);
+      pg.addColorStop(1, PALETTE.woodLight);
+      ctx.fillStyle = pg;
+      circle(ctx, px, py, t * 0.13);
+      ctx.fill();
+      ctx.fillStyle = 'rgba(255,240,210,0.5)';
+      circle(ctx, px - t * 0.035, py - t * 0.04, t * 0.035);
+      ctx.fill();
+    });
+  }
+
+  // Rocks: smooth shaded boulders that melt into a ridge where they join.
+  function drawRockCells(ctx, field, cells) {
+    if (!cells.length) return;
+    var ox = field.x, oy = field.y, t = field.tile;
+    var on = cellSet(cells);
+    var isOn = function (r, c) { return !!on[r + ',' + c]; };
+    var stone = ctx.createLinearGradient(0, oy, 0, oy + field.rows * t);
+    stone.addColorStop(0, PALETTE.rockLight);
+    stone.addColorStop(0.5, PALETTE.rockBase);
+    stone.addColorStop(1, PALETTE.rockDark);
+
+    // pooled contact shadow under the whole ridge, one fill call.
+    ctx.save();
+    ctx.fillStyle = PALETTE.shadow;
+    ctx.beginPath();
+    cells.forEach(function (cell) {
+      ctx.rect(ox + cell.c * t, oy + (cell.r + 0.72) * t, t, t * 0.28);
+    });
+    ctx.fill();
+    ctx.restore();
+
+    ctx.fillStyle = stone;
+    cells.forEach(function (cell) {
+      ctx.fillRect(ox + cell.c * t, oy + cell.r * t, t, t);
+    });
+    roundUnionCorners(ctx, ox, oy, t, field.rows, field.cols, isOn,
+                      stone, stone, t * 0.34);
+
+    // cool top light washing the whole ridge at once, so joined boulders
+    // read as one smooth shaded mass, not separate blocks.
+    ctx.save();
+    ctx.beginPath();
+    cells.forEach(function (cell) {
+      ctx.rect(ox + cell.c * t, oy + cell.r * t, t, t);
+    });
+    ctx.clip();
+    var sg = ctx.createLinearGradient(0, oy, 0, oy + field.rows * t);
+    sg.addColorStop(0, 'rgba(255,255,255,0.30)');
+    sg.addColorStop(0.45, 'rgba(255,255,255,0)');
+    ctx.fillStyle = sg;
+    ctx.fillRect(ox, oy, field.cols * t, field.rows * t);
+    ctx.fillStyle = 'rgba(255,255,255,0.35)';
+    cells.forEach(function (cell) {
+      if (!isOn(cell.r, cell.c - 1) && !isOn(cell.r - 1, cell.c)) {
+        ellipse(ctx, ox + (cell.c + 0.30) * t, oy + (cell.r + 0.22) * t,
+                t * 0.13, t * 0.06);
+        ctx.fill();
+      }
+    });
+    ctx.restore();
+  }
+
+  function cellSet(cells) {
+    var on = {};
+    cells.forEach(function (cell) { on[cell.r + ',' + cell.c] = true; });
+    return on;
+  }
+
+  // ------------------------------------------------- glossy puddle, no tile
+  // An ellipse of wet mud blended into the surface (soft alpha rim) with
+  // a sky-gloss highlight. Plowed puddles read darker, already tracked.
+  function drawMudPuddle(ctx, x, y, s, plowed) {
+    var cx = x + s / 2, cy = y + s * 0.54;
+    ctx.save();
+    var g = ctx.createRadialGradient(cx, cy, s * 0.04, cx, cy, s * 0.44);
+    if (plowed) {
+      g.addColorStop(0, '#4A2C12');
+      g.addColorStop(0.7, 'rgba(74,44,18,0.95)');
+    } else {
+      g.addColorStop(0, PALETTE.mudBase);
+      g.addColorStop(0.7, 'rgba(93,58,30,0.95)');
+    }
+    g.addColorStop(1, 'rgba(93,58,30,0)');
+    ctx.fillStyle = g;
+    ellipse(ctx, cx, cy, s * 0.44, s * 0.30);
+    ctx.fill();
+    // wet sheen
+    var sheen = ctx.createRadialGradient(cx - s * 0.12, cy - s * 0.10, s * 0.01,
+                                         cx - s * 0.12, cy - s * 0.10, s * 0.20);
+    sheen.addColorStop(0, PALETTE.mudGloss);
+    sheen.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = sheen;
+    ellipse(ctx, cx - s * 0.12, cy - s * 0.10, s * 0.20, s * 0.11);
+    ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,0.5)';
+    circle(ctx, cx + s * 0.16, cy + s * 0.12, s * 0.022);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // -------------------------------------------- things that sit ON the soil
+  // Crops, bales and the barn cast soft contact shadows straight onto the
+  // surface — no tile backing under any of them.
+  function contactShadow(ctx, s, cx, cy, rx, ry) {
+    ctx.fillStyle = PALETTE.shadow;
+    ellipse(ctx, cx, cy, rx, ry);
+    ctx.fill();
   }
 
   function paintCorn(ctx, s) {
-    var box = paintCropBase(ctx, s, 21);
     var cx = s / 2;
     ctx.save();
+    contactShadow(ctx, s, cx, s * 0.80, s * 0.22, s * 0.06);
     // stalks
     ctx.strokeStyle = PALETTE.cornLeafDk;
     ctx.lineCap = 'round';
@@ -258,9 +665,9 @@
   }
 
   function paintWheat(ctx, s) {
-    var box = paintCropBase(ctx, s, 33);
     var cx = s / 2;
     ctx.save();
+    contactShadow(ctx, s, cx, s * 0.82, s * 0.20, s * 0.055);
     ctx.lineCap = 'round';
     // sheaf of 5 stalks fanning out, each tipped with a grain head
     for (var i = -2; i <= 2; i++) {
@@ -288,9 +695,9 @@
   }
 
   function paintPumpkin(ctx, s) {
-    var box = paintCropBase(ctx, s, 55);
     var cx = s / 2, cy = s * 0.55;
     ctx.save();
+    contactShadow(ctx, s, cx, s * 0.74, s * 0.24, s * 0.06);
     // vine curl
     ctx.strokeStyle = PALETTE.vineGreen;
     ctx.lineCap = 'round';
@@ -326,34 +733,11 @@
     ctx.restore();
   }
 
-  function paintMud(ctx, s) {
-    var box = tileBase(ctx, s, '#7A4E28', PALETTE.mudBase, PALETTE.mudDark);
-    ctx.save();
-    rr(ctx, box.x, box.y, box.w, box.h, box.r);
-    ctx.clip();
-    // dark puddle patches
-    ctx.fillStyle = 'rgba(30,17,5,0.45)';
-    ellipse(ctx, s * 0.36, s * 0.60, s * 0.20, s * 0.12); ctx.fill();
-    ellipse(ctx, s * 0.68, s * 0.42, s * 0.15, s * 0.10); ctx.fill();
-    // wet gloss blob (the "you stop here" read) + small shine dots
-    var g = ctx.createRadialGradient(s * 0.38, s * 0.34, s * 0.01, s * 0.38, s * 0.34, s * 0.20);
-    g.addColorStop(0, PALETTE.mudGloss);
-    g.addColorStop(1, 'rgba(255,255,255,0)');
-    ctx.fillStyle = g;
-    ellipse(ctx, s * 0.38, s * 0.34, s * 0.20, s * 0.11); ctx.fill();
-    ctx.fillStyle = 'rgba(255,255,255,0.5)';
-    circle(ctx, s * 0.66, s * 0.66, s * 0.025); ctx.fill();
-    circle(ctx, s * 0.72, s * 0.60, s * 0.016); ctx.fill();
-    ctx.restore();
-  }
-
   function paintHay(ctx, s) {
-    var box = tileBase(ctx, s, PALETTE.dirtLight, PALETTE.dirtBase, PALETTE.dirtDark);
-    var cx = s / 2, cy = s * 0.52, r = s * 0.27;
+    var cx = s / 2, cy = s * 0.50, r = s * 0.27;
     ctx.save();
-    // soft shadow under the bale
-    ctx.fillStyle = PALETTE.shadow;
-    ellipse(ctx, cx, cy + r * 0.95, r * 1.02, r * 0.28); ctx.fill();
+    // soft contact shadow on the soil
+    contactShadow(ctx, s, cx, cy + r * 0.98, r * 1.0, r * 0.26);
     // bale side (golden cylinder face-on)
     var g = ctx.createLinearGradient(cx - r, cy - r, cx + r, cy + r);
     g.addColorStop(0, '#F6D878');
@@ -382,121 +766,64 @@
     ctx.restore();
   }
 
-  function paintTrailFull(ctx, s) {
-    // Deep tilled earth + furrow lines (horizontal; game rotates via opts).
-    var box = tileBase(ctx, s, PALETTE.trailLight, PALETTE.trailBase, PALETTE.trailDark);
-    ctx.save();
-    rr(ctx, box.x, box.y, box.w, box.h, box.r);
-    ctx.clip();
-    ctx.lineCap = 'round';
-    for (var i = 0; i < 4; i++) {
-      var fy = box.y + box.h * (0.22 + i * 0.19);
-      ctx.strokeStyle = PALETTE.furrowDark;
-      ctx.lineWidth = s * 0.045;
-      ctx.globalAlpha = 0.8;
-      ctx.beginPath();
-      ctx.moveTo(box.x + box.w * 0.10, fy);
-      ctx.quadraticCurveTo(box.x + box.w * 0.5, fy + s * 0.03,
-                           box.x + box.w * 0.90, fy);
-      ctx.stroke();
-      ctx.strokeStyle = PALETTE.furrowLight;
-      ctx.lineWidth = s * 0.016;
-      ctx.globalAlpha = 0.7;
-      ctx.beginPath();
-      ctx.moveTo(box.x + box.w * 0.10, fy - s * 0.032);
-      ctx.quadraticCurveTo(box.x + box.w * 0.5, fy - s * 0.002,
-                           box.x + box.w * 0.90, fy - s * 0.032);
-      ctx.stroke();
+  function paintDirtFlat(ctx, s) {
+    var g = ctx.createLinearGradient(0, 0, 0, s);
+    g.addColorStop(0, PALETTE.soilTop);
+    g.addColorStop(1, PALETTE.soilBottom);
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, s, s);
+  }
+
+  function paintTrailFlat(ctx, s) {
+    var g = ctx.createLinearGradient(0, 0, 0, s);
+    g.addColorStop(0, PALETTE.trailTop);
+    g.addColorStop(1, PALETTE.trailBottom);
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, s, s);
+    ctx.strokeStyle = PALETTE.furrowDark;
+    ctx.lineWidth = Math.max(1, s * 0.028);
+    ctx.globalAlpha = 0.55;
+    for (var k = 0; k < 3; k++) {
+      var fy = s * (0.25 + k * 0.25);
+      ctx.beginPath(); ctx.moveTo(0, fy); ctx.lineTo(s, fy); ctx.stroke();
     }
     ctx.globalAlpha = 1;
-    ctx.restore();
   }
 
-  function paintFence(ctx, s) {
-    var box = paintCropBase(ctx, s, 77);
-    var cx = s / 2;
-    ctx.save();
-    ctx.fillStyle = PALETTE.shadow;
-    rr(ctx, cx - s * 0.30, s * 0.80, s * 0.60, s * 0.05, s * 0.025); ctx.fill();
-    // two posts
-    var post = function (x) {
-      var g = ctx.createLinearGradient(x - s * 0.05, 0, x + s * 0.05, 0);
-      g.addColorStop(0, PALETTE.woodDark);
-      g.addColorStop(0.45, PALETTE.woodBase);
-      g.addColorStop(1, PALETTE.woodLight);
-      ctx.fillStyle = g;
-      rr(ctx, x - s * 0.05, s * 0.24, s * 0.10, s * 0.56, s * 0.03); ctx.fill();
-      ctx.fillStyle = PALETTE.woodLight;
-      circle(ctx, x, s * 0.25, s * 0.05); ctx.fill();
-      ctx.fillStyle = 'rgba(255,255,255,0.45)';
-      circle(ctx, x - s * 0.018, s * 0.235, s * 0.014); ctx.fill();
-    };
-    // two rails
-    var rail = function (y) {
-      var g = ctx.createLinearGradient(0, y - s * 0.045, 0, y + s * 0.045);
-      g.addColorStop(0, PALETTE.woodLight);
-      g.addColorStop(0.5, PALETTE.woodBase);
-      g.addColorStop(1, PALETTE.woodDark);
-      ctx.fillStyle = g;
-      rr(ctx, cx - s * 0.32, y - s * 0.045, s * 0.64, s * 0.09, s * 0.04); ctx.fill();
-    };
-    rail(s * 0.40);
-    rail(s * 0.62);
-    post(cx - s * 0.22);
-    post(cx + s * 0.22);
-    ctx.restore();
+  // Single smooth raised blocks (compat fallback; the game draws joined
+  // runs via drawFenceCells/drawRockCells instead).
+  function paintFenceBlock(ctx, s) {
+    var g = ctx.createLinearGradient(0, 0, 0, s);
+    g.addColorStop(0, PALETTE.woodLight);
+    g.addColorStop(0.5, PALETTE.woodBase);
+    g.addColorStop(1, PALETTE.woodDark);
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, s, s);
   }
 
-  function paintRock(ctx, s) {
-    var box = paintCropBase(ctx, s, 99);
-    var cx = s / 2, cy = s * 0.56;
-    ctx.save();
-    ctx.fillStyle = PALETTE.shadow;
-    ellipse(ctx, cx, cy + s * 0.17, s * 0.26, s * 0.07); ctx.fill();
-    // chunky beveled boulder: faceted polygon with light from top-left
-    var g = ctx.createLinearGradient(cx - s * 0.25, cy - s * 0.20, cx + s * 0.25, cy + s * 0.20);
+  function paintRockBlock(ctx, s) {
+    var g = ctx.createLinearGradient(0, 0, 0, s);
     g.addColorStop(0, PALETTE.rockLight);
     g.addColorStop(0.5, PALETTE.rockBase);
     g.addColorStop(1, PALETTE.rockDark);
     ctx.fillStyle = g;
-    ctx.beginPath();
-    ctx.moveTo(cx - s * 0.24, cy + s * 0.12);
-    ctx.lineTo(cx - s * 0.18, cy - s * 0.10);
-    ctx.lineTo(cx - s * 0.02, cy - s * 0.18);
-    ctx.lineTo(cx + s * 0.18, cy - s * 0.08);
-    ctx.lineTo(cx + s * 0.24, cy + s * 0.10);
-    ctx.lineTo(cx + s * 0.10, cy + s * 0.17);
-    ctx.lineTo(cx - s * 0.12, cy + s * 0.17);
-    ctx.closePath(); ctx.fill();
-    // facet cracks + gloss nick
-    ctx.strokeStyle = 'rgba(70,80,90,0.7)';
-    ctx.lineWidth = s * 0.018;
-    ctx.lineCap = 'round';
-    ctx.beginPath(); ctx.moveTo(cx - s * 0.02, cy - s * 0.18); ctx.lineTo(cx - s * 0.05, cy - s * 0.02); ctx.lineTo(cx + s * 0.10, cy + s * 0.05); ctx.stroke();
-    ctx.fillStyle = 'rgba(255,255,255,0.75)';
-    ellipse(ctx, cx - s * 0.11, cy - s * 0.09, s * 0.05, s * 0.028); ctx.fill();
-    ctx.restore();
+    ctx.fillRect(0, 0, s, s);
   }
 
   function paintBarn(ctx, s, t) {
-    // Goal tile. Pulsing glow is time-based, so the barn draws LIVE
-    // (not from the sprite cache) via drawBarn().
+    // Goal barn sitting on the soil. Pulsing glow is time-based, drawn live.
     t = (t === undefined) ? 0 : t;
     var pulse = 0.5 + 0.5 * Math.sin(t * 2.4);
-    var box = tileBase(ctx, s, PALETTE.dirtLight, PALETTE.dirtBase, PALETTE.dirtDark,
-                       { shadow: true });
     ctx.save();
-    rr(ctx, box.x, box.y, box.w, box.h, box.r);
-    ctx.clip();
     // warm glow wash behind the barn, breathing with `pulse`
     var glow = ctx.createRadialGradient(s / 2, s * 0.46, s * 0.05, s / 2, s * 0.46, s * 0.48);
     glow.addColorStop(0, 'rgba(255,150,120,' + (0.35 + pulse * 0.30).toFixed(3) + ')');
     glow.addColorStop(1, 'rgba(255,150,120,0)');
     ctx.fillStyle = glow;
-    ctx.fillRect(box.x, box.y, box.w, box.h);
+    ctx.fillRect(0, 0, s, s);
 
     var bx = s * 0.5, bw = s * 0.52, top = s * 0.26, bot = s * 0.78;
-    // shadow under barn
+    // soft contact shadow
     ctx.fillStyle = PALETTE.shadow;
     rr(ctx, bx - bw / 2 + s * 0.02, bot - s * 0.02, bw, s * 0.06, s * 0.03); ctx.fill();
     // red body
@@ -545,9 +872,10 @@
   }
 
   // ------------------------------------------------------- tractor (live)
-  // Top-down chunky tractor. Drawn live (not cached) because it tilts,
-  // squashes and rotates every frame while sliding.
-  // opts: { angle (rad, 0 = facing right), tilt, squash (0..~0.25), time }
+  // Top-down Adrian-orange tractor, drawn live (tilts, squashes and
+  // rotates every frame while sliding). Rounder bodywork than phase 3,
+  // softer shadow pooled beneath it.
+  // opts: { angle (rad, 0 = facing right), tilt, squash (0..~0.25) }
   function drawTractor(ctx, x, y, s, opts) {
     opts = opts || {};
     var ang = opts.angle || 0;
@@ -559,11 +887,13 @@
     ctx.scale(1 + squash * 0.6, 1 - squash * 0.4);
     var u = s / 100; // unit: tractor designed on a 100x100 box
 
-    // soft shadow (offset down-right, stays unrotated-ish for readability)
+    // soft pooled shadow (stays unrotated-ish for readability)
     ctx.save();
     ctx.rotate(-(ang + tilt));
-    ctx.fillStyle = PALETTE.shadow;
-    ellipse(ctx, u * 5, u * 8, u * 34, u * 26); ctx.fill();
+    ctx.fillStyle = 'rgba(60,30,5,0.30)';
+    ellipse(ctx, u * 5, u * 9, u * 34, u * 26); ctx.fill();
+    ctx.fillStyle = 'rgba(60,30,5,0.18)';
+    ellipse(ctx, u * 5, u * 9, u * 40, u * 31); ctx.fill();
     ctx.restore();
 
     // rear wheels (big) + front wheels (small)
@@ -595,32 +925,32 @@
     wheel(u * 24, -u * 22, u * 9);
     wheel(u * 24, u * 22, u * 9);
 
-    // chassis + hood (Adrian-orange) with top gloss
+    // chassis + hood (Adrian-orange) with a soft top gloss
     var g = ctx.createLinearGradient(0, -u * 20, 0, u * 20);
     g.addColorStop(0, '#FF9A3D');
     g.addColorStop(0.5, PALETTE.tractorBody);
     g.addColorStop(1, PALETTE.tractorDark);
     ctx.fillStyle = g;
-    rr(ctx, -u * 26, -u * 17, u * 56, u * 34, u * 9); ctx.fill();
+    rr(ctx, -u * 26, -u * 17, u * 56, u * 34, u * 14); ctx.fill();
     ctx.fillStyle = 'rgba(255,255,255,0.45)';
-    rr(ctx, -u * 20, -u * 14, u * 44, u * 9, u * 4); ctx.fill();
+    rr(ctx, -u * 19, -u * 13, u * 42, u * 10, u * 5); ctx.fill();
 
     // cab + glass
     ctx.fillStyle = PALETTE.tractorDark;
-    rr(ctx, -u * 20, -u * 13, u * 20, u * 26, u * 5); ctx.fill();
+    rr(ctx, -u * 20, -u * 13, u * 20, u * 26, u * 8); ctx.fill();
     var gg = ctx.createLinearGradient(-u * 20, 0, u * 0, 0);
     gg.addColorStop(0, '#E7F5FF');
     gg.addColorStop(1, PALETTE.tractorCabDk);
     ctx.fillStyle = gg;
-    rr(ctx, -u * 17, -u * 10, u * 14, u * 20, u * 4); ctx.fill();
+    rr(ctx, -u * 17, -u * 10, u * 14, u * 20, u * 6); ctx.fill();
     ctx.fillStyle = 'rgba(255,255,255,0.8)';
     rr(ctx, -u * 15, -u * 8, u * 5, u * 12, u * 2); ctx.fill();
 
     // exhaust stack + steering nub
     ctx.fillStyle = '#343A40';
-    rr(ctx, u * 16, -u * 12, u * 6, u * 8, u * 2); ctx.fill();
+    rr(ctx, u * 16, -u * 12, u * 6, u * 8, u * 3); ctx.fill();
     ctx.fillStyle = '#868E96';
-    circle(ctx, u * 19, -u * 12, u * 3); ctx.fill();
+    circle(ctx, u * 19, u * 12, u * 3); ctx.fill();
     ctx.restore();
   }
 
@@ -736,22 +1066,23 @@
 
   // ------------------------------------------------------- public API
   var PAINTERS = {
-    dirt: function (ctx, s) { paintDirt(ctx, s, 7); },
-    trail: paintTrailFull,
+    dirt: paintDirtFlat,
+    trail: paintTrailFlat,
     corn: paintCorn,
     wheat: paintWheat,
     pumpkin: paintPumpkin,
-    mud: paintMud,
+    mud: function (ctx, s) { drawMudPuddle(ctx, 0, 0, s, false); },
     hay: paintHay,
-    fence: paintFence,
-    rock: paintRock
+    fence: paintFenceBlock,
+    rock: paintRockBlock
     // barn excluded: animated, drawn live with drawBarn()
   };
 
-  // Bake every static tile to an offscreen canvas once. Call at boot
+  // Bake every static sprite to an offscreen canvas once. Call at boot
   // (and again only if you change resolution).
   function prerenderAll(px) {
     SPRITE_PX = px || 192;
+    bakeNoise();
     for (var key in PAINTERS) {
       if (PAINTERS.hasOwnProperty(key)) {
         (function (k) { makeSprite(k, PAINTERS[k]); })(key);
@@ -759,14 +1090,17 @@
     }
   }
 
-  // Dispatcher: draws any static tile from the cache.
+  function blit(ctx, key, x, y, s) {
+    ctx.drawImage(SPRITES[key], x, y, s, s);
+  }
+
+  // Dispatcher: draws small surface-sitting sprites from the cache.
   // opts.harvestT (0..1): pop/scale bounce for a freshly harvested crop.
-  // opts.vertical: rotate furrows 90deg for vertical trail runs.
   function drawTile(ctx, type, x, y, s, opts) {
     opts = opts || {};
     if (type === 'barn') { drawBarnLive(ctx, x, y, s, opts.time || 0); return; }
     if (type === 'trail' && opts.edge !== undefined) {
-      drawTrail(ctx, x, y, s, opts.edge, opts.dir || 'right', !!opts.vertical);
+      drawTrail(ctx, x, y, s, opts.edge, opts.dir || 'right');
       return;
     }
     if (!SPRITES[type]) return; // unknown type: skip, never throw in the loop
@@ -782,61 +1116,7 @@
       ctx.restore();
       return;
     }
-    if (opts.vertical && SPRITES[type + '_v']) {
-      ctx.drawImage(SPRITES[type + '_v'], x, y, s, s);
-      return;
-    }
     blit(ctx, type, x, y, s);
-  }
-
-  // THE signature effect: sweeping tilled-earth fill with a live leading
-  // edge. progress 0..1 across the tile, dir = travel direction.
-  // Mid-slide the edge reads as a rounded wet-plow wave, not a hard clip.
-  function drawTrail(ctx, x, y, s, progress, dir, vertical) {
-    progress = Math.max(0, Math.min(1, progress));
-    ctx.save();
-    if (vertical) {
-      ctx.translate(x + s / 2, y + s / 2);
-      ctx.rotate(Math.PI / 2);
-      ctx.translate(-s / 2, -s / 2);
-      x = 0; y = 0;
-    }
-    // soil under the sweep so the edge never shows transparency
-    blit(ctx, 'dirt', x, y, s);
-    var pad = s * 0.045;
-    var innerX = x + pad, innerW = s - pad * 2;
-    var leadX = innerX + innerW * progress;
-    ctx.save();
-    ctx.beginPath();
-    if (dir === 'left') {
-      ctx.rect(leadX, y - 1, innerX + innerW - leadX, s + 2);
-    } else if (dir === 'up' || dir === 'down') {
-      // vertical sweeps reuse the horizontal painter on the rotated frame;
-      // treat both as "from the left" in local space.
-      ctx.rect(x - 1, y - 1, (leadX - x) + 1, s + 2);
-      if (dir === 'up') ctx.rect(leadX, y - 1, innerX + innerW - leadX, s + 2);
-    } else {
-      ctx.rect(x - 1, y - 1, (leadX - x) + 1, s + 2);
-    }
-    ctx.clip();
-    ctx.drawImage(SPRITES.trail, x, y, s, s);
-    ctx.restore();
-    // rounded wet leading edge + glossy lip highlight
-    if (progress > 0.02 && progress < 0.995) {
-      var ey = y + s / 2;
-      var er = (s - pad * 2) / 2;
-      var g = ctx.createLinearGradient(leadX - s * 0.09, 0, leadX, 0);
-      g.addColorStop(0, 'rgba(0,0,0,0)');
-      g.addColorStop(1, 'rgba(40,20,5,0.30)');
-      ctx.fillStyle = g;
-      ctx.fillRect(leadX - s * 0.09, y + pad, s * 0.09, s - pad * 2);
-      ctx.fillStyle = PALETTE.trailBase;
-      var ex = (dir === 'left') ? leadX - er * 0.15 : leadX + er * 0.15;
-      ellipse(ctx, ex, ey, er * 0.32, er); ctx.fill();
-      ctx.fillStyle = 'rgba(255,255,255,0.35)';
-      ellipse(ctx, ex - er * 0.06, ey - er * 0.45, er * 0.10, er * 0.32); ctx.fill();
-    }
-    ctx.restore();
   }
 
   // Barn draws at arbitrary size: render to a scratch canvas at bake
@@ -862,6 +1142,12 @@
     drawTrail: drawTrail,
     drawBarn: drawBarnLive,
     drawTractor: drawTractor,
+    drawFieldBase: drawFieldBase,
+    drawFieldLight: drawFieldLight,
+    drawTrailLayer: drawTrailLayer,
+    drawFenceCells: drawFenceCells,
+    drawRockCells: drawRockCells,
+    drawMudPuddle: drawMudPuddle,
     particles: particles,
     spawnDust: spawnDust,
     spawnHarvest: spawnHarvest,
@@ -872,3 +1158,5 @@
 
   global.HarvestArt = api;
 })(typeof window !== 'undefined' ? window : this);
+
+

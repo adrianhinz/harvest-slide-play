@@ -494,47 +494,37 @@
     return { x: view.ox + c * view.tile, y: view.oy + r * view.tile };
   }
 
-  function drawMudMark(x, y, s) {
-    const pal = art.PALETTE;
-    ctx.save();
-    ctx.fillStyle = pal.mudDark;
-    ctx.beginPath();
-    ctx.ellipse(x + s * 0.5, y + s * 0.62, s * 0.18, s * 0.1, 0, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = pal.mudGloss;
-    ctx.beginPath();
-    ctx.ellipse(x + s * 0.44, y + s * 0.56, s * 0.07, s * 0.035, -0.5, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.restore();
+  function fieldOf() {
+    const grid = level.grid;
+    return {
+      x: view.ox,
+      y: view.oy,
+      tile: view.tile,
+      rows: grid.length,
+      cols: grid[0].length,
+    };
   }
 
-  function paintCell(r, c) {
-    const t = view.tile;
-    const p = cellXY(r, c);
+  // Finished (fully painted) cells of the trail band. Mirrors trailLook
+  // but answers per cell for the seamless union painter.
+  function trailFull(r, c) {
+    const idx = level.plowAt[r][c];
+    if (idx < 0 || !state.plowed[idx]) return false;
+    if (!anim || anim.kind !== "slide" || anim.fresh[idx] === undefined) return true;
+    return anim.dist >= anim.fresh[idx];
+  }
+
+  // The single cell mid-sweep, if any (rounded wet leading cap).
+  function trailPartial() {
+    if (!anim || anim.kind !== "slide") return null;
     const grid = level.grid;
-    const ch = grid[r][c];
-    if (ch === "#") {
-      const edge = r === 0 || c === 0 || r === grid.length - 1 || c === grid[0].length - 1;
-      art.drawTile(ctx, edge ? "fence" : "rock", p.x, p.y, t);
-      return;
+    for (let r = 0; r < grid.length; r++) {
+      for (let c = 0; c < grid[r].length; c++) {
+        const look = trailLook(r, c);
+        if (look && !look.full) return { r: r, c: c, frac: look.frac, dir: facing };
+      }
     }
-    if (ch === "B") {
-      art.drawBarn(ctx, p.x, p.y, t, timeSec);
-      return;
-    }
-    const look = trailLook(r, c);
-    if (look && look.full) {
-      art.drawTile(ctx, "trail", p.x, p.y, t);
-      if (ch === "M") drawMudMark(p.x, p.y, t);
-      return;
-    }
-    if (look && !look.full) {
-      const vertical = facing === "up" || facing === "down";
-      art.drawTrail(ctx, p.x, p.y, t, look.frac, facing, vertical);
-      return;
-    }
-    if (ch === "M") art.drawTile(ctx, "mud", p.x, p.y, t);
-    else art.drawTile(ctx, "dirt", p.x, p.y, t);
+    return null;
   }
 
   function tractorXY() {
@@ -567,8 +557,34 @@
       ctx.translate((Math.random() - 0.5) * shake * 2, (Math.random() - 0.5) * shake * 2);
     }
     const grid = level.grid;
+    const field = fieldOf();
+    const t = field.tile;
+    // one continuous soil surface, then the flowing paint band over it
+    art.drawFieldBase(ctx, field.x, field.y, field.cols * t, field.rows * t, t);
+    art.drawTrailLayer(ctx, field, trailFull, trailPartial());
+    // walls: border runs join into wooden walls, interior into boulders
+    const fence = [];
+    const rock = [];
     for (let r = 0; r < grid.length; r++) {
-      for (let c = 0; c < grid[r].length; c++) paintCell(r, c);
+      for (let c = 0; c < grid[r].length; c++) {
+        if (grid[r][c] !== "#") continue;
+        const edge = r === 0 || c === 0 || r === grid.length - 1 || c === grid[r].length - 1;
+        (edge ? fence : rock).push({ r: r, c: c });
+      }
+    }
+    art.drawRockCells(ctx, field, rock);
+    art.drawFenceCells(ctx, field, fence);
+    // glossy puddles blend into soil or paint; the barn sits on the soil
+    for (let r = 0; r < grid.length; r++) {
+      for (let c = 0; c < grid[r].length; c++) {
+        if (grid[r][c] === "M") {
+          const p = cellXY(r, c);
+          art.drawMudPuddle(ctx, p.x, p.y, t, state.plowed[level.plowAt[r][c]]);
+        } else if (grid[r][c] === "B") {
+          const p = cellXY(r, c);
+          art.drawBarn(ctx, p.x, p.y, t, timeSec);
+        }
+      }
     }
     for (let i = 0; i < level.crops.length; i++) {
       if (!cropShown(i)) continue;
@@ -600,6 +616,7 @@
       squash: tp.squash,
     });
     art.drawParticles(ctx);
+    art.drawFieldLight(ctx, field.x, field.y, field.cols * t, field.rows * t, t);
     ctx.restore();
   }
 
